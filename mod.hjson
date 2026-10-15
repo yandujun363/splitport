@@ -10,7 +10,7 @@ minGameVersion: "146"
 
 # Fill this in once the repository is published somewhere (used for the
 # in-game update/import button).
-# repo: "https://github.com/<you>/splitport"
+# repo: "https://github.com/yandujun363/splitport"
 
 # Client-side only. 'hidden' keeps this mod out of the mod-list handshake
 # (Mods.getModStrings()) so servers without it do not kick you for having an
