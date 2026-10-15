@@ -1,0 +1,10 @@
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.idea/
+.vscode/
+
+# NOTE: the built mod archive (<mod-name>.zip) is committed on purpose - it is
+# the file users drop into their mods/ folder. Rebuild it with ./build.sh.
