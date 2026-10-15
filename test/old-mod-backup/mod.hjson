@@ -1,0 +1,6 @@
+name: "split-port-srv"
+displayName: "Split Port (SRV)"
+author: "dshwork"
+description: "Client-side only. Resolves separate TCP and UDP ports from the _mindustry._tcp and _mindustry._udp SRV records, so it can connect to servers whose NAT forwards the two protocols to different external ports. No server or game source changes required."
+version: "1.0"
+minGameVersion: "140"
