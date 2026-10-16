@@ -47,7 +47,7 @@ hostServer    : server.bind(port, port);
 
 ## 安装
 
-把 [splitport.zip]([splitport.zip](https://github.com/yandujun363/splitport/releases/latest/download/splitport.zip))（或整个模组目录）放进游戏的 `mods` 目录：
+把 [splitport.zip](https://github.com/yandujun363/splitport/releases/latest/download/splitport.zip) `mods` 目录：
 
 | 平台 | 路径 |
 | --- | --- |
