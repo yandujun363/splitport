@@ -8,3 +8,7 @@ Thumbs.db
 
 # NOTE: the built mod archive (<mod-name>.zip) is committed on purpose - it is
 # the file users drop into their mods/ folder. Rebuild it with ./build.sh.
+
+# Compiled test classes (javac -d out). Rebuild them with the command in
+# test/README.md; they are not worth tracking.
+test/test/out/

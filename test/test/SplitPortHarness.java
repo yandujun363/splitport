@@ -50,6 +50,9 @@ public class SplitPortHarness{
     static final int DNS_PORT = 15353;
     static final int HOST_PORT = 17567;
     static final String HOSTNAME = "localhost";
+    /** A name that only exists as a CNAME (no A record), like a real
+     *  dynamically-published _mindustry alias. */
+    static final String ALIAS = "alias.test";
 
     static final InetAddress LOCAL = InetAddress.getLoopbackAddress();
 
@@ -64,6 +67,9 @@ public class SplitPortHarness{
         var metaJs = Paths.get(args[2]);
 
         // ---- minimal game environment -------------------------------------
+        // Uncomment to see the per-server debug lines the mod emits
+        // (SRV query failures, probe fallbacks, ...):
+        // arc.util.Log.level = arc.util.Log.LogLevel.debug;
         Core.app = new MockApplication();
         Core.settings = new MockSettings();
         Vars.headless = true;
@@ -109,10 +115,9 @@ public class SplitPortHarness{
         String global = new String(java.nio.file.Files.readAllBytes(globalJs), StandardCharsets.UTF_8);
         cx.evaluateString(scope, global, "global.js", 1);
 
-        String mod = new String(java.nio.file.Files.readAllBytes(modJs), StandardCharsets.UTF_8);
-        cx.evaluateString(scope, "modName = \"split-port-srv\"; scriptName = \"main.js\";", "initscript.js", 1);
-        cx.evaluateString(scope, "(function(){'use strict';\n" + mod + "\n})();", "main.js", 1);
-        System.out.println("[harness] global.js + mod script evaluated by Rhino");
+        File scriptsDir = ModLoader.scriptsDirOf(modJs.toString());
+        ModLoader.runMod(cx, scope, scriptsDir, "splitport");
+        System.out.println("[harness] global.js + mod scripts evaluated by Rhino");
 
         // ---- fire ClientLoadEvent -> the mod installs itself --------------
         Events.fire(new ClientLoadEvent());
@@ -127,6 +132,11 @@ public class SplitPortHarness{
 
         System.out.println("\n=== install ===");
         check("mod replaced Vars.net", Vars.net != null && Vars.net != originalNet);
+        // MindustryX replaces Net.pingHost with PingService, so hooking only the
+        // ArcNetProvider is not enough there: the mod has to override Net
+        // itself. This asserts the subclass, not just "some other Net".
+        check("Vars.net is a Net subclass (Net.pingHost itself is overridden)",
+            Vars.net.getClass() != Net.class && Vars.net.getClass().getSuperclass() == Net.class);
         check("every packet handler survived the swap (client "
                 + listenerCount(Vars.net, "clientListeners") + "/" + origClientListeners + ")",
             listenerCount(Vars.net, "clientListeners") == origClientListeners);
@@ -292,8 +302,7 @@ public class SplitPortHarness{
         cx2.setOptimizationLevel(9);
         Scriptable scope2 = new ImporterTopLevel(cx2);
         cx2.evaluateString(scope2, global, "global.js", 1);
-        cx2.evaluateString(scope2, "modName = \"split-port-srv\"; scriptName = \"main.js\";", "initscript.js", 1);
-        cx2.evaluateString(scope2, "(function(){'use strict';\n" + mod + "\n})();", "main.js", 1);
+        ModLoader.runMod(cx2, scope2, scriptsDir, "splitport");
 
         // DNS deliberately answers nothing now: only the restored route can work
         dns.clear();
@@ -306,6 +315,36 @@ public class SplitPortHarness{
             check("restored Host.port is the TCP port " + PUB_TCP + " (got " + restored.port + ")",
                 restored.port == PUB_TCP);
         }
+
+        // =============================================================
+        // scenario 9: the _mindustry names themselves are CNAMEs
+        // =============================================================
+        System.out.println("\n=== scenario 9: _mindustry SRV reached through a CNAME ===");
+        Vars.net.disconnect();
+        connectEvent.set(false);
+        dns.clear();
+        dns.put("_mindustry._tcp." + HOSTNAME, 10, 10, PUB_TCP, HOSTNAME);
+        dns.put("_mindustry._udp." + HOSTNAME, 10, 10, PUB_UDP, HOSTNAME);
+        // The entry the player uses is an alias with no A record of its own:
+        // its _mindustry names are CNAMEs onto the real ones. A real nameserver
+        // answers with the CNAME plus the target's SRV, using a compression
+        // pointer for the second owner name.
+        dns.putCname("_mindustry._tcp." + ALIAS, "_mindustry._tcp." + HOSTNAME);
+        dns.putCname("_mindustry._udp." + ALIAS, "_mindustry._udp." + HOSTNAME);
+
+        dns.resetQueries();
+        Host aliased = ping(ALIAS, VANILLA_PORT);
+        check("ping through a CNAME-aliased SRV succeeded", aliased != null);
+        if(aliased != null){
+            check("Host.port is the externally published TCP port " + PUB_TCP + " (got " + aliased.port + ")",
+                aliased.port == PUB_TCP);
+        }
+        check("the aliased _mindustry._tcp name was queried", dns.queried("_mindustry._tcp." + ALIAS));
+
+        int before9 = split.connections.get();
+        check("client received Connect", connect(aliased == null ? HOSTNAME : aliased.address,
+            aliased == null ? PUB_TCP : aliased.port));
+        check("server completed the TCP+UDP registration", split.connections.get() > before9 && split.udpRegistered.get());
 
         // =============================================================
         // scenario 8: hosting a game still binds both protocols
@@ -644,6 +683,7 @@ public class SplitPortHarness{
     static class SrvDns implements Closeable{
         final DatagramSocket socket;
         final Map<String, List<String[]>> records = new ConcurrentHashMap<>();
+        final Map<String, String> cnames = new ConcurrentHashMap<>();
         final Set<String> queries = ConcurrentHashMap.newKeySet();
         volatile boolean closed;
 
@@ -656,8 +696,16 @@ public class SplitPortHarness{
                 .add(new String[]{"" + priority, "" + weight, "" + port, target});
         }
 
+        /** Publish an alias: querying 'name' answers with a CNAME onto
+         *  'target', followed by the target's own SRV records - exactly what a
+         *  nameserver sends for a CNAME-aliased _mindustry name. */
+        void putCname(String name, String target){
+            cnames.put(name.toLowerCase(Locale.ROOT), target.toLowerCase(Locale.ROOT));
+        }
+
         void clear(){
             records.clear();
+            cnames.clear();
         }
 
         void resetQueries(){
@@ -704,8 +752,13 @@ public class SplitPortHarness{
 
             String qname = name.toString().toLowerCase(Locale.ROOT);
             queries.add(qname);
+
             List<String[]> answers = records.get(qname);
-            int ancount = answers == null ? 0 : answers.size();
+            String cnameTarget = answers == null ? cnames.get(qname) : null;
+            List<String[]> viaCname = cnameTarget == null ? null : records.get(cnameTarget);
+
+            int ancount = answers != null ? answers.size()
+                : cnameTarget != null ? 1 + (viaCname == null ? 0 : viaCname.size()) : 0;
 
             writeShort(out, id);
             writeShort(out, 0x8180);   // response, recursion available
@@ -719,24 +772,58 @@ public class SplitPortHarness{
             if(answers != null){
                 for(String[] a : answers){
                     writeShort(out, 0xC00C);       // pointer to the question name
-                    writeShort(out, 33);           // SRV
-                    writeShort(out, 1);            // IN
-                    writeInt(out, 300);
-                    ByteArrayOutputStream rdata = new ByteArrayOutputStream();
-                    writeShort(rdata, Integer.parseInt(a[0]));
-                    writeShort(rdata, Integer.parseInt(a[1]));
-                    writeShort(rdata, Integer.parseInt(a[2]));
-                    // deliberately uncompressed: ArcDns cannot follow pointers in RDATA
-                    for(String label : a[3].split("\\.")){
-                        rdata.write(label.length());
-                        rdata.write(label.getBytes(StandardCharsets.US_ASCII), 0, label.length());
+                    writeSrvBody(out, a);
+                }
+            }else if(cnameTarget != null){
+                writeShort(out, 0xC00C);           // owner: the question name
+                writeShort(out, 5);                // CNAME
+                writeShort(out, 1);                // IN
+                writeInt(out, 300);
+                byte[] encoded = encodeName(cnameTarget);
+                writeShort(out, encoded.length);
+                int targetOffset = out.size();
+                out.write(encoded, 0, encoded.length);
+
+                if(viaCname != null){
+                    for(String[] a : viaCname){
+                        // A real nameserver points the following owner name back
+                        // at the CNAME RDATA. ArcDns reads that 0xC0 as a label
+                        // length and walks off the end of the record.
+                        writeShort(out, 0xC000 | targetOffset);
+                        writeSrvBody(out, a);
                     }
-                    rdata.write(0);
-                    writeShort(out, rdata.size());
-                    out.write(rdata.toByteArray(), 0, rdata.size());
                 }
             }
 
+            return out.toByteArray();
+        }
+
+        /** SRV RR body: type, class, ttl, rdlength, rdata. */
+        static void writeSrvBody(ByteArrayOutputStream out, String[] a){
+            writeShort(out, 33);           // SRV
+            writeShort(out, 1);            // IN
+            writeInt(out, 300);
+            ByteArrayOutputStream rdata = new ByteArrayOutputStream();
+            writeShort(rdata, Integer.parseInt(a[0]));
+            writeShort(rdata, Integer.parseInt(a[1]));
+            writeShort(rdata, Integer.parseInt(a[2]));
+            // deliberately uncompressed: ArcDns cannot follow pointers in RDATA
+            byte[] target = encodeName(a[3]);
+            rdata.write(target, 0, target.length);
+            writeShort(out, rdata.size());
+            out.write(rdata.toByteArray(), 0, rdata.size());
+        }
+
+        /** Uncompressed wire form of a domain name. */
+        static byte[] encodeName(String name){
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            for(String label : name.split("\\.")){
+                if(label.isEmpty()) continue;
+                byte[] bytes = label.getBytes(StandardCharsets.US_ASCII);
+                out.write(bytes.length);
+                out.write(bytes, 0, bytes.length);
+            }
+            out.write(0);
             return out.toByteArray();
         }
 

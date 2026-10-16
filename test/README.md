@@ -1,6 +1,20 @@
 # splitport-mod 开发 / 测试环境
 
-这个目录**不属于模组本体**，只是开发时用的参考资料和测试。模组本体在 `../splitport-mod/`。
+这是 `test` 分支上的测试脚手架，**不属于模组本体**。仓库内布局：
+
+```
+<repo>/
+  mod.hjson  scripts/  docs/  README.md ...   模组本体（与 main 分支一致）
+  test/                                       本脚手架
+    README.md                                 本文件
+    refs/                                     Mindustry v160.7 发布包（jar 随脚手架提交）
+    old-mod-backup/                           v1 旧模组备份
+    test/                                     测试源码
+```
+
+下文命令都假设你**站在 `test/test/` 目录**执行，因此模组本体用 `../../` 引用
+（`../../scripts/main.js`、`../../mod.hjson`）。在开发机上脚手架原本放在
+`splitport-mod-dev/`，那时同样的路径写成 `../../splitport-mod/...`。
 
 ## 内容
 
@@ -12,19 +26,24 @@ refs/
 old-mod-backup/          v1 旧模组原文件备份
 test/
   old/main-prefix.js     v2.0（修复前）的 main.js，用于 A/B 对比
-  SplitPortHarness.java  离线集成测试（9 个场景）
+  SplitPortHarness.java  离线集成测试（10 个场景，含 CNAME + 压缩指针）
   SrvGate.java           DNS 并发丢包率测量
   SrvStress.java         真实社区列表整表刷新压力测试（A/B）
   LivePing.java          真实服务器上的完整 ping 链路测试
   ConcurrentPing.java    266 条并发 ping，检查每个都恰好回调一次
   Measure.java / NsProbe.java / NsList.java   DNS / RTT / nameserver 诊断小工具
-  out/                   编译输出
+  ModLoader.java         复刻游戏的脚本加载：装同款 require 再跑 main.js（测试都经它加载）
+  RhinoCheck.java        逐个模块、逐个顶层函数用 Rhino 编译，定位"优化器编译不过"的函数
+  CnameCase.java         真实服务器对照：vanilla / 模组 / 带过期记忆路由，在 CNAME 域名上的表现
+  DnsCheck.java          直接用 ArcDns 查两个域名，对比"有 CNAME"和"没 CNAME"
+  DnsDump.java           抓真实应答并逐字节重放 ArcDns 的解析循环
+  out/                   编译输出（已被 .gitignore 忽略，clone 后自己 javac 生成）
 ```
 
 ## 编译与运行
 
 ```bash
-cd test
+cd test/test
 javac -nowarn -cp ../refs/server-release.jar -d out *.java
 ```
 
@@ -33,8 +52,8 @@ javac -nowarn -cp ../refs/server-release.jar -d out *.java
 ```bash
 java -cp out:../refs/server-release.jar SplitPortHarness \
      ../refs/x/scripts/global.js \
-     ../../splitport-mod/scripts/main.js \
-     ../../splitport-mod/mod.hjson
+     ../../scripts/main.js \
+     ../../mod.hjson
 ```
 
 退出码 0 = 全部通过。用官方包里的**真实** Arc 网络栈、**真实** Mindustry Rhino、
@@ -96,7 +115,7 @@ java -cp out:../refs/server-release.jar SrvStress \
 
 # 修复后
 java -cp out:../refs/server-release.jar SrvStress \
-     ../refs/x/scripts/global.js ../../splitport-mod/scripts/main.js /tmp/servers_v8.json \
+     ../refs/x/scripts/global.js ../../scripts/main.js /tmp/servers_v8.json \
      mdt-v4-srv.play.jiahai.top 23608 6 10
 ```
 
@@ -111,7 +130,7 @@ curl -o /tmp/servers_v8.json https://raw.githubusercontent.com/Anuken/MindustryS
 
 ```bash
 java -cp out:../refs/server-release.jar LivePing \
-     ../refs/x/scripts/global.js ../../splitport-mod/scripts/main.js mdt-v4-srv.play.jiahai.top
+     ../refs/x/scripts/global.js ../../scripts/main.js mdt-v4-srv.play.jiahai.top
 ```
 
 依次 ping：域名 → 把结果当成收藏夹（`<IP>:<TCP端口>`）再 ping → 直接 ping 原始 UDP 端口。
@@ -120,7 +139,7 @@ java -cp out:../refs/server-release.jar LivePing \
 
 ```bash
 java -cp out:../refs/server-release.jar ConcurrentPing \
-     ../refs/x/scripts/global.js ../../splitport-mod/scripts/main.js /tmp/servers_v8.json x
+     ../refs/x/scripts/global.js ../../scripts/main.js /tmp/servers_v8.json x
 ```
 
 最后一个参数 `vanilla` 可以跳过模组安装，作为原版基线对比耗时。

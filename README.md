@@ -1,7 +1,7 @@
 # SplitPort (SRV)
 
 > [!IMPORTANT]
-> 本模组为纯粹Agent产物，使用dsh+DeepSeel-V4.1-Flash生成，包括测试案例和这个说明文件和文档，我本人目前只做了基本的进入游戏测试，核心功能的确没问题。能跑。关于测试脚手架，测试脚手架目前在这个分支的test文件夹下，但我懒得改引用了，所以如果要测试可能得自己折腾折腾。反正目前问题不大模组能跑就行。
+> 本模组为纯粹Agent产物，使用dsh+DeepSeel-V4.1-Flash生成，包括测试案例和这个说明文件和文档，我本人目前只做了基本的进入游戏测试，核心功能的确没问题。能跑。测试脚手架在**本分支**的 `test/` 目录下（`main` 分支没有），具体命令见 [开发和测试](#开发和测试)。
 
 **让 Mindustry 客户端按 DNS SRV 记录分别使用 TCP 端口和 UDP 端口** —— 专治经过 NAT 打洞 / 端口映射之后「对外 TCP 端口和对外 UDP 端口不一样」的服务器。
 
@@ -253,18 +253,21 @@ CommonJS `require()` 载入（见 [docs/INTERNALS.md §1](docs/INTERNALS.md)）�
 | `LICENSE` | GPL-3.0-only |
 | `splitport.zip` | 打包好的安装包（`./build.sh` 重新生成，已递归包含 `scripts/lib/`） |
 
-开发 / 测试环境不在本仓库里，在 `../splitport-mod-dev/`（见那里的 `README.md`）。
+开发 / 测试脚手架就在**本分支**的 [`test/`](test/README.md) 下（`main` 分支上没有它）。
 它会用官方发布包里的**真实 Arc / Rhino / 游戏类**、并通过和游戏同款的 `require()`
 加载这套脚本，跑离线集成测试：
 
 ```bash
-cd ../splitport-mod-dev/test
+cd test/test
 javac -nowarn -cp ../refs/server-release.jar -d out *.java
 java -cp out:../refs/server-release.jar SplitPortHarness \
      ../refs/x/scripts/global.js \
-     ../../splitport-mod/scripts/main.js \
-     ../../splitport-mod/mod.hjson
+     ../../scripts/main.js \
+     ../../mod.hjson
 ```
+
+`test/refs/` 里的两个 jar（Mindustry v160.7 发布包）随脚手架一起提交，clone 下来即可运行；
+编译产物 `out/` 已被 `.gitignore` 忽略。
 
 退出码 0 = 全部通过（10 个场景）。想改这个模组，请**先读 [docs/INTERNALS.md](docs/INTERNALS.md)**：
 里面写了 Rhino / 并发的坑（正则、循环里的 `const`、`Seq.get`、反射……），全是踩过的。

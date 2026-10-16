@@ -4,7 +4,9 @@
 
 - 模组 ID：`splitport`，版本 2.3，许可证 GPL-3.0-only。
 - 本体是一个 Rhino 脚本模组：`../scripts/main.js`（入口，约 140 行）+ `../scripts/lib/*.js` + `../mod.hjson`。
-- 测试环境在 `../../splitport-mod-dev/`（不在本仓库内）。
+- 测试脚手架：`test` 分支里就在仓库内的 `../test/`；开发机上原来是 `../../splitport-mod-dev/`。
+  下文命令里的 `../../splitport-mod-dev/test` 在本分支换成 `../test/test`，
+  `../../splitport-mod/scripts` 换成 `../../scripts`（工作目录都是 `test/test/`）。
 
 ---
 

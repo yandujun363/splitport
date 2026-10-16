@@ -48,9 +48,7 @@ public class LivePing{
         cx.setOptimizationLevel(9);
         Scriptable scope = new ImporterTopLevel(cx);
         cx.evaluateString(scope, new String(java.nio.file.Files.readAllBytes(globalJs), StandardCharsets.UTF_8), "global.js", 1);
-        cx.evaluateString(scope, "modName = \"split-port-srv\"; scriptName = \"main.js\";", "initscript.js", 1);
-        cx.evaluateString(scope, "(function(){'use strict';\n"
-            + new String(java.nio.file.Files.readAllBytes(modJs), StandardCharsets.UTF_8) + "\n})();", "main.js", 1);
+        ModLoader.runMod(cx, scope, ModLoader.scriptsDirOf(modJs.toString()), "splitport");
 
         Events.fire(new ClientLoadEvent());
         System.out.println("mod installed: " + (Vars.net != originalNet));
