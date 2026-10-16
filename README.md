@@ -9,7 +9,7 @@
 | --- | --- |
 | 模组 ID | `splitport` |
 | 显示名 | SplitPort (SRV) |
-| 版本 | 2.2 |
+| 版本 | 2.3 |
 | 最低游戏版本 | 146（开发与实测环境：160.7） |
 | 平台 | Windows / Linux / macOS / Android；**iOS 不支持**；Steam 联机自动跳过 |
 | 类型 | 纯客户端脚本模组（`scripts/main.js`），不添加任何游戏内容 |
@@ -20,7 +20,7 @@
 - **多人游戏兼容**：`mod.hjson` 里 `hidden: true`，模组不会出现在联机握手的模组列表（`Mods.getModStrings()`）里，所以服务端没装也不会把你踢掉。
 - **记住路由**：收藏夹里被存成 `IP:TCP端口` 的服务器、掉线重连、游戏重启之后，依然能找回当初的 UDP 端口。
 
-> ⚠️ **已知问题**：只发布 SRV 记录、没有 A/AAAA 记录的域名（"纯 SRV 域名"），在服务器列表里 PING 会显示「无响应」，但**直接进入服务器是正常的**，核心功能（分离 TCP/UDP 端口连接）可用。详见 [已知问题](#已知问题作者实测)。
+> 2.3 起模组**自带 DNS 解析器**：SRV 记录所在的名字本身是 **CNAME**（例如 `_mindustry._tcp.play.example.com` CNAME 到 `_mindustry._tcp.node.example.net`）也能正常解析，服务器列表里的 PING 不再卡住。上游 `ArcDns` 的解析器遇到 CNAME 会抛 `StringIndexOutOfBoundsException`，详见 [已知问题](#已知问题作者实测) 与 [docs/INTERNALS.md](docs/INTERNALS.md)。
 
 ---
 
@@ -88,7 +88,7 @@ _mindustry._udp.example.com.  300 IN SRV 10 10 25566 example.com.
 2. 两条记录的 **target 应指向同一台主机**（同一个域名最省事）。`arc.net.Client.connect(timeout, host, tcpPort, udpPort)` 只接受一个主机地址，TCP 和 UDP 共用；两条 target 不同时模组会在日志里警告，并采用 `_tcp` 的 target。
 3. **只发 `_udp`、不发 `_tcp`**：TCP 端口会沿用玩家请求的端口（默认 6567）。想用非默认 TCP 端口，请把 `_tcp` 也发上。
 4. 玩家用**域名**加入（服务器列表里填 `example.com`，端口留默认 6567）。手填非默认端口不会触发 SRV，该端口会同时当作 TCP 和 UDP。
-5. 纯 SRV 域名（没有 A/AAAA 记录）可以连接，但服务器列表里的 PING 目前有问题，见下一节。
+5. 纯 SRV 域名（没有 A/AAAA 记录）可以连接，服务器列表里的 PING 也正常（2.3 起）。SRV 记录本身是 CNAME 同样可以。
 
 ---
 
@@ -133,36 +133,45 @@ _mindustry._udp.example.com.  300 IN SRV 10 10 25566 example.com.
 
 > 这一节记录的是**实际测试中确认存在**的问题，不是推测。
 
-### 1. 纯 SRV 域名在服务器列表里 PING 不到（未修复）
+### 1. 纯 SRV 域名 / CNAME 别名在列表里 PING 不到（2.3 已修复）
 
 **现象**
 
 - 服务器域名只发布 SRV 记录（`_mindustry._tcp` / `_mindustry._udp`），没有 A/AAAA 记录。
-- 刷新服务器列表时，该条目显示为**「无响应」**（或一直转圈），看起来像服务器没开。
-- 但**直接进入服务器是正常的**：能连上、能正常玩。也就是说分离端口这个核心功能是实现了的。
+- 刷新服务器列表时，该条目显示**「无响应」**，或者干脆**一直转圈**（既不显示无响应也不显示内容）。
+- 「直接进入服务器」在 2.2 上也不一定成功：如果之前连过一次，模组会拿记忆路由里**已经失效的 NAT 端口**去连，结果是 `SocketTimeoutException`。
 
-**影响范围**
+**根因**
 
-- 只是**服务器列表的发现 / PING** 有问题（属于显示与「能不能从列表点进去」的问题），不影响连接本身。
-- 有 A 记录的域名不受影响。
-- 成功连过一次之后，路由会被记住并写进 `Core.settings`，之后的 PING 可以走记忆路由，该条目就能正常显示了 —— 这是目前可用的临时规避手段。
+上游 `arc.net.dns.ArcDns` 的 SRV 解析器**假设应答里每一条记录都是 SRV**：不判断 TYPE，也不按 RDLENGTH 切片，直接按「6 字节 SRV 头 + 域名标签遍历」去消费 RDATA。
 
-**根因（基于代码分析）**
+当 `_mindustry._tcp.example.com` 本身是 **CNAME** 时，应答长这样：
 
-`pingHost` 的兜底顺序是：SRV → 记忆路由 → 原版单端口直连。对纯 SRV 域名来说：
+```dns
+_mindustry._tcp.example.com.      CNAME  _mindustry._tcp.node.example.net.
+_mindustry._tcp.node.example.net. SRV    5 50 23899 openwrt.example.net.
+```
 
-1. SRV 查询可能因为解析器丢包、或并发闸门超时而拿不到记录（`srvQuery` 返回 `null`）；此时若还没有记忆路由，就会走到第 3 步。
-2. 即使拿到了 `_udp` 记录：探测包（或它的回包）在整表刷新的洪峰里被丢掉，`_udp` 的 target 3 次都没应答时，`pingThroughSrv` 也返回 `null`，同样落到第 3 步。
-3. 第 3 步是 `rawPing(address, port)`，内部 `InetAddress.getByName(address)` 对**没有 A 记录的域名**必然抛 `UnknownHostException` → 回调 `invalid` → 列表显示「无响应」。
+解析器会把 CNAME 的 RDATA 当成 priority/weight/port 读，再沿着域名标签一路读到 RDATA 之外、把下一条记录一起吞掉；流错位之后在一个空名字上执行 `builder.delete(-1, 0)`，抛出
 
-而「直接进入服务器」走的是 `connectClient` → `resolveRoute`：那里只做**一次不并发的 SRV 查询**，拿到记录后直接用 `_tcp` 的 target/端口和 `_udp` 的端口去连接，所以能成功。
+```
+java.lang.StringIndexOutOfBoundsException: Range [-1, 0) out of bounds for length 0
+```
 
-**可能的修复方向**（尚未实现，欢迎 PR）
+它是 **`RuntimeException`，不是 `IOException`**，而 `ArcDns.getSrvRecords(domain)` 只 `catch(IOException)`，原版 `ArcNetProvider.pingHost` 也只 `catch(IOException)`：
 
-- `pingThroughSrv` 在 `_udp` 目标不应答时，只要 `_tcp` 有记录，就用 `_tcp` 的 target/端口返回一个可达的 `Host`（UDP 端口仍然用记录里的那个），而不是返回 `null`、让流程落到注定失败的域名直连；
-- 对「纯 SRV 域名 + SRV 无应答」的情况，考虑直接用上一次成功解析出来的 `_tcp` target 作为 ping 目标。
+- **原版**：异常逃出 `pingHost`，被 `Net.pingExecutor.submit()` 的 Future 静默吞掉，`valid`/`invalid` 一个都不回调 → 条目永远停在「刷新中」。
+- **MindustryX**：它的 `Net.pingHost` 被换成了自己的 `PingService`（`patches/client/0061`），而 `PingService` 第一件事是 `InetAddress.getByName(address)` —— 纯 SRV 域名没有 A 记录，这一步必然抛 `UnknownHostException`，同样没有任何 catch → 一样永远「刷新中」。
 
-**状态**：v2.2 未修复。v2.2 修掉的是同一类现象中的另外两个原因（并发把本机解析器打爆、逐服务器失败日志刷屏），详见 [docs/INTERNALS.md](docs/INTERNALS.md)。
+这也意味着：**在 MindustryX 上，2.2 及更早版本的 `pingHost` 覆盖根本不会被调用**（只有 `connectClient` 生效）。日志里那些 `[SplitPort] SRV ... -> ...` 行来自 `connectClient → resolveRoute`，不是 PING。
+
+**2.3 的修复**
+
+1. 模组不再用 `ArcDns` 的解析器，改为**自己收发并解析 DNS**：按 TYPE 分发、按 RDLENGTH 切片、支持 `0xC0` 名字压缩指针、跟随 CNAME 链（同一条应答里有 SRV 就直接用，只有 CNAME 就用目标名重查，深度上限 4）。
+2. 模组现在**同时覆盖 `Net.pingHost` 本身**（用 `Net` 的子类），因为 MindustryX 把 `Net.pingHost` 顶掉了，只在 `ArcNetProvider` 上挂钩在那里不会被调用。子类化失败会回退到原来的 provider 挂钩。
+3. 连接时（`connectClient`）**以 DNS 为准**：域名 + 默认端口总是先解析一次 SRV，解析不到才用记忆路由；连接超时后会把那条过期路由删掉，不再一直粘着旧 NAT 端口。
+
+**状态**：2.3 已修复。`SplitPortHarness` 场景 9 覆盖了「CNAME + 压缩指针」的完整链路。
 
 ### 2. 测试盲区
 
@@ -179,7 +188,7 @@ _mindustry._udp.example.com.  300 IN SRV 10 10 25566 example.com.
 - 在服务器列表里手填非默认端口不会触发 SRV，按原版单端口处理。
 - 记忆路由是「粘性」的：服务器永久换了端口、而旧端口又还有机器应答时，最多会多花一次超时。DNS 明确回答「没有 SRV 记录」时记忆路由不生效。
 - 原版客户端无法连接分离端口的服务器 —— 本模组只改客户端，服务端保持原版即可。
-- `ArcDns` 自带的 SRV 解析器不校验记录类型、不支持 RDATA 里的名称压缩指针。绝大多数 DNS 符合 RFC 2782（SRV 的 target 不压缩），实测正常；不合规的 DNS 会导致查询失败并回退到单端口。
+- 模组自带 DNS 解析器，**不依赖** `ArcDns` 能读懂应答：记录类型、RDLENGTH、名字压缩指针、CNAME 链都由模组自己处理。只有 UDP 应答被截断（TC=1）时才当作「没有应答」并回退 —— 那种情况需要 TCP 查询，模组不做。
 - 安装时会在旧的 `Net` 之外再建一个 `ArcNetProvider`，旧的那个（一个 selector + 一个 socketChannel）不会被回收。每次启动泄漏一个文件描述符量级，可以忽略。
 
 ---
@@ -222,23 +231,31 @@ _mindustry._udp.example.com.  300 IN SRV 10 10 25566 example.com.
 | 2.0 | 修掉 v1 的两个致命 bug（换 `Net` 时丢包处理器、缺 `hidden: true` 导致被服务端踢），第一次真正能进游戏 |
 | 2.1 | 区分「没有 SRV 记录」和「DNS 没有应答」；SRV 查询限流 + 重试；记住路由（收藏夹 / 重连 / 重启） |
 | 2.2 | 已知路由时只给 DNS 很短的窗口并改用带上限的 `tryAcquire`，修掉 PING 卡在「刷新中」；逐服务器失败日志降到 `debug`，不再刷屏 |
+| 2.3 | 自带 DNS 解析器：SRV 记录所在名字是 CNAME 也能解析，支持名字压缩指针；覆盖 `Net.pingHost` 本身（MindustryX 用 `PingService` 顶掉了 `provider.pingHost`）；连接以 DNS 为准，超时后清掉过期记忆路由 |
 
 ---
 
 ## 开发和测试
 
-模组本体只有两个文件（游戏实际加载的东西），其余是文档和打包产物：
+脚本按职责拆在 `scripts/` 下。**游戏只会执行 `main.js`**，其余文件由它用游戏自带的
+CommonJS `require()` 载入（见 [docs/INTERNALS.md §1](docs/INTERNALS.md)）：
 
 | 文件 | 说明 |
 | --- | --- |
 | `mod.hjson` | 模组元数据（`hidden: true` 是关键） |
-| `scripts/main.js` | 全部逻辑 |
+| `scripts/main.js` | 入口：只做 `require()` 和 `ClientLoadEvent` 注册（约 140 行） |
+| `scripts/lib/util.js` | 小工具：错误转换、IP 判断、结尾点、no-service |
+| `scripts/lib/routes.js` | 记忆路由表 + 写进 `Core.settings` 的持久化 |
+| `scripts/lib/dns.js` | 自带 DNS 客户端（记录类型 / RDLENGTH / 压缩指针 / CNAME） |
+| `scripts/lib/srv.js` | SRV 查询闸门与重试、UDP 探测、`resolveRoute` |
+| `scripts/lib/net.js` | `ArcNetProvider`/`Net` 子类、ping/连接入口、`install()` |
 | `README.md` / `docs/INTERNALS.md` | 用户文档 / 内部实现细节 |
 | `LICENSE` | GPL-3.0-only |
-| `splitport.zip` | 打包好的安装包（`./build.sh` 重新生成） |
+| `splitport.zip` | 打包好的安装包（`./build.sh` 重新生成，已递归包含 `scripts/lib/`） |
 
 开发 / 测试环境不在本仓库里，在 `../splitport-mod-dev/`（见那里的 `README.md`）。
-它会用官方发布包里的**真实 Arc / Rhino / 游戏类**加载**真正的 `scripts/main.js`**，跑离线集成测试：
+它会用官方发布包里的**真实 Arc / Rhino / 游戏类**、并通过和游戏同款的 `require()`
+加载这套脚本，跑离线集成测试：
 
 ```bash
 cd ../splitport-mod-dev/test
@@ -249,7 +266,7 @@ java -cp out:../refs/server-release.jar SplitPortHarness \
      ../../splitport-mod/mod.hjson
 ```
 
-退出码 0 = 全部通过（9 个场景）。想改这个模组，请**先读 [docs/INTERNALS.md](docs/INTERNALS.md)**：
+退出码 0 = 全部通过（10 个场景）。想改这个模组，请**先读 [docs/INTERNALS.md](docs/INTERNALS.md)**：
 里面写了 Rhino / 并发的坑（正则、循环里的 `const`、`Seq.get`、反射……），全是踩过的。
 
 ---
@@ -292,9 +309,15 @@ This mod replaces the net provider on the client and:
   never kick you;
 - remembers learned routes across restarts (favourites stored as `IP:TCPport`, reconnects).
 
-**Known issue:** for hosts that publish *only* SRV records (no A/AAAA record), the server-list PING
-shows the entry as "not responding"; joining such a server directly still works, so the core feature is
-functional. See the Chinese "已知问题" section above for the root cause and suggested fixes.
+**Up to 2.2** such hosts could not be pinged from the server list at all: `ArcDns`' own SRV parser
+throws a `RuntimeException` as soon as the answer contains a CNAME, and MindustryX's `PingService`
+throws on the `InetAddress.getByName()` of a name that has no A/AAAA record. Neither caller catches
+either, so the entry spins on "refreshing..." forever (and a stale remembered route could make joining
+fail with a connect timeout as well).
+
+**2.3** ships its own DNS client (record-type dispatch, RDLENGTH slicing, compression pointers, CNAME
+chains) and overrides `Net.pingHost` itself, so list pings work on vanilla and on MindustryX; connecting
+also re-resolves DNS first and forgets a remembered route once it times out.
 
 Licensed under **GPL-3.0-only**, matching upstream Mindustry (the mod links against GPL-3.0 classes at
 runtime, so a permissive licence such as MIT is not compatible).

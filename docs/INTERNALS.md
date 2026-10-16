@@ -2,9 +2,66 @@
 
 面向要改这个模组的人。用户文档在 [../README.md](../README.md)。
 
-- 模组 ID：`splitport`，版本 2.2，许可证 GPL-3.0-only。
-- 本体是一个 Rhino 脚本模组：`../scripts/main.js`（约 930 行）+ `../mod.hjson`。
+- 模组 ID：`splitport`，版本 2.3，许可证 GPL-3.0-only。
+- 本体是一个 Rhino 脚本模组：`../scripts/main.js`（入口，约 140 行）+ `../scripts/lib/*.js` + `../mod.hjson`。
 - 测试环境在 `../../splitport-mod-dev/`（不在本仓库内）。
+
+---
+
+## 0. 文件结构与脚本加载
+
+```
+scripts/
+  main.js        入口：只做 require() 和 ClientLoadEvent 注册
+  lib/util.js    工具函数（错误转换、IP 判断、结尾点、no-service）
+  lib/routes.js  记忆路由表 + Core.settings 持久化
+  lib/dns.js     DNS 客户端（记录类型 / RDLENGTH / 压缩指针 / CNAME）
+  lib/srv.js     SRV 查询闸门与重试、UDP 探测、resolveRoute
+  lib/net.js     ArcNetProvider/Net 子类、ping/连接入口、install()
+```
+
+**游戏只会执行 `scripts/main.js`。** `Mods.loadScripts` 的逻辑是：
+
+```java
+Seq<Fi> allScripts = mod.root.child("scripts").findAll(f -> f.extEquals("js"));
+Fi main = allScripts.size == 1 ? allScripts.first() : mod.root.child("scripts").child("main.js");
+if(main.exists()) scripts.run(mod, main);
+```
+
+所以 `lib/*.js` 必须由 `main.js` **在顶层**用 `require()` 拉进来。
+
+`require` 是游戏自己装的：`mindustry.mod.Scripts` 的构造函数里用 Rhino 的
+`RequireBuilder` + 一个 `ScriptModuleProvider`（把模块 id 解析到本模组 `scripts/` 下的
+`<id>.js`）装到全局 scope 上。两条后果必须记住：
+
+1. **`require()` 只能在 `main.js` 顶层调用。** 模块 id 的解析依赖 `Scripts.currentMod`，
+   而它只在 `Scripts.run(mod, file)` 执行期间非 null；`ClientLoadEvent` 触发时早已清空，
+   在事件回调里 `require` 会失败。
+2. **模块是 sandboxed 的**（`setSandboxed(true)`）：模块可以**读**到 `global.js` 装好的全局
+   （`Vars`、`Core`、`Log`、`java`/`Packages`、`ArcDns`、`extend`、`run`、`cons`……），
+   但自己声明的东西不会泄漏到全局，所以每个模块通过 `module.exports` 交出 API。
+
+依赖方向单向、无环：
+
+```
+util  <--  routes  <--  srv  <--  net  <--  main
+              ^           ^
+              |           |
+             dns ---------+
+```
+
+（`srv` 依赖 `util`、`dns`、`routes`；`net` 依赖 `util`、`routes`、`srv`。）
+
+拆分时踩到的两个坑，都只在**运行时**才暴露（加载本身不报错）：
+
+- **跨模块引用必须显式导出。** 第一版拆完，`lib/net.js` 的 ping 入口用了
+  `SRV_GATE_WAIT_MS` 和 `asException`，却既没从 `srv` 导出、也没在 `net` 引入，
+  Rhino 只抛 `"SRV_GATE_WAIT_MS" is not defined`，而它又被 `pingHost` 最外层的兜底
+  catch 吃掉 —— 现象是"服务器列表里这个条目永远无响应"，没有任何加载错误。
+  这类问题**只能靠回归测试抓**。
+- **原 `main.js` 的常量区最容易漏。** 拆 `routes` 模块时忘了把
+  `const routes = new ConcurrentHashMap()` 一起搬走，症状同样是运行时的
+  `"routes" is not defined`。
 
 ---
 
@@ -181,26 +238,47 @@ v2.2 的修复：
 | 整表刷新时的 `[SplitPort] ping probe` 错误行 | 几百行 | **0 行** |
 | 无路由的纯 SRV 域名整表刷新（0% 丢包） | 13.8s | 8.6s |
 
-## 4. 仍未修复：纯 SRV 域名的列表 PING
+## 4. 纯 SRV 域名与 CNAME：为什么必须自己解析 DNS（2.3 已修复）
 
-用户实测确认（README「已知问题」）：**只发布 SRV 记录、没有 A/AAAA 记录的域名**，在服务器列表
-里会显示"无响应"，但直接进服务器是正常的。
+上游 `ArcDns.getSrvRecords(domain, nameserver)` 的解析循环把应答里的**每一条** RR 都当 SRV 读：
+不看 TYPE，也不按 RDLENGTH 切片，直接读 6 字节 priority/weight/port，再按域名标签遍历 RDATA。
 
-`pingHost` 的第 3 步兜底是原版逻辑：
+应答里出现 CNAME 时（`_mindustry._tcp.alias` → `_mindustry._tcp.real`）：
 
-```js
-const host = rawPing(address, port);   // 内部 InetAddress.getByName(address)
-```
+1. CNAME 的 RDATA 前 6 字节被读成 priority/weight/port；
+2. 域名遍历从 RDATA 第 7 字节开始，越过 RDLENGTH 边界，把后面的 RR 一起吞掉；
+3. 流错位之后 `builder` 可能为空，`builder.delete(builder.length() - 1, builder.length())`
+   就成了 `delete(-1, 0)` → `StringIndexOutOfBoundsException`。
 
-对纯 SRV 域名，`InetAddress.getByName()` 必然抛 `UnknownHostException`，所以这一层兜底**永远
-不可能成功**；也就是说纯 SRV 域名的 ping 完全依赖第 1 步（`pingThroughSrv` 里 `_udp` target 的
-UDP 发现包恰好成功）或第 2 步（已经记住的路由）。当 SRV 查询拿不到记录 / 闸门超时 / `_udp`
-探测三次都不应答时，条目就只能显示"无响应"。
+这是 **RuntimeException**，`ArcDns.getSrvRecords(domain)`（只 catch IOException）和原版
+`ArcNetProvider.pingHost`（同样只 catch IOException）都不会捕获它：
 
-`pingThroughSrv` 目前还有一个可以商量的行为：`_udp` target 全部不应答时它返回 `null`，
-哪怕 `_tcp` 记录明确存在。改成"`_tcp` 有记录就返回一个可达的 `Host`（UDP 端口仍用记录里的值）"
-应该就能让这类条目正常显示并可以点进去。注意这样做的语义变化：ping 的结果不再代表"UDP 发现
-包通了"，而只是"DNS 里有这台服务器的记录"。做之前请先补上对应的测试场景。
+- **原版**：异常逃出 `pingHost`，被 `Net.pingExecutor.submit()` 的 Future 静默吞掉，
+  `valid`/`invalid` 都不回调 → 列表条目永远"刷新中"。
+- **MindustryX**：`patches/client/0061-H-replace-pingHost-with-PingService.patch` 把
+  `Net.pingHost` 整个换成了 `PingService.INSTANCE.pingHost(...)`，而它第一步
+  `InetAddress.getByName(address)` 对纯 SRV 域名必然抛 `UnknownHostException`，并且同样
+  没有任何 catch → 一样永远"刷新中"。
+
+**推论（很重要）**：在 MindustryX 上，2.2 及更早版本的 `provider.pingHost` 覆盖**根本不会被
+调用**，只有 `connectClient` 生效。用户日志里那些 `[SplitPort] SRV ... -> ...` 行来自
+`connectClient → resolveRoute`，不是 PING。要在这类构建上生效，必须覆盖 `Net` 本身。
+
+2.3 的做法：
+
+1. `dnsBuildQuery()` / `dnsReceive()` / `dnsExchange()` / `dnsName()` / `dnsParseAnswer()` /
+   `dnsQueryOnce()` 自己收发并解析 DNS：按 TYPE 分发、按 RDLENGTH 切片、支持 0xC0 压缩指针、
+   跟随 CNAME（同应答里有 SRV 就直接用，只有 CNAME 就用目标名重查，深度上限 `DNS_CNAME_DEPTH`，
+   `HashSet` 防环）。
+2. `install()` 里用 `extend(Net, provider, {...})` **覆盖 `Net.pingHost` 本身**，
+   `provider.pingHost` 保留给仍然走 provider 的构建；子类化失败回退到 `new Net(provider)`。
+3. `doPing()` 负责把工作挪出调用线程（`Threads.daemon`）：原版由 `pingExecutor` 调用，
+   MindustryX 由 `mainExecutor` 调用，而覆盖之后调用线程就是渲染线程。
+4. `doConnect()` 对"域名 + 默认端口"总是先查一次 SRV，DNS 没结果才用记忆路由；
+   连接抛异常时 `forgetRoute()` 删掉那条过期路由（NAT 端口变了以后它只会一直超时）。
+
+`SplitPortHarness` 场景 9 覆盖了完整链路：本地 DNS 故意把 CNAME 之后的第二条记录的 owner
+写成指向 CNAME RDATA 的压缩指针。
 
 ## 5. Rhino / 并发的坑（改动时请遵守）
 
@@ -230,6 +308,18 @@ UDP 发现包恰好成功）或第 2 步（已经记住的路由）。当 SRV �
    `map.keys().toSeq().toArray()` 再遍历。
 7. **`JoinDialog` 会一次 ping 几百个服务器**，任何"每次 ping 都要做一次网络往返"的设计都必须限流，
    否则本机 resolver 会丢应答（见 §3.1）。
+8. **循环体内不要用 `const`（这条 2.3 又踩了一次）。** `dnsName()` 的第一版在 `while` 里写了
+   `const len = msg.charCodeAt(pos)`，Rhino 优化器把它折叠成首次取值，于是解析出来的记录流全是错的
+   —— 表面现象是"SRV 查询永远查不到记录"，没有异常、没有日志。第 2 条不是理论。
+9. **`new java.lang.String(...)` 不是 JS 字符串。** Rhino 把 `java.lang.String` 当 Java 对象包着，
+   `charCodeAt()` / `substring()` 不会按 JS 字符串工作。DNS 应答转文本时必须显式写一次 `"" + ...`
+   转成 JS 字符串（见 `dnsText()`），否则 `charCodeAt` 抛错、被 catch 吞掉，同样是"永远查不到记录"。
+10. **单个函数的局部变量不能太多。** `dnsExchange()` 最初把"构造查询 + 收发 + 校验"写在一起，
+    Rhino 优化器生成 StackMapTable 时直接
+    `ArrayIndexOutOfBoundsException: arraycopy: last source index 33 out of bounds for object array[32]`，
+    整份脚本都编译不过（`Context.evaluateString` 阶段就炸，游戏里表现为模组加载失败）。
+    拆成 `dnsBuildQuery()` / `dnsReceive()` / `dnsExchange()` 三个函数即可。
+    `../../splitport-mod-dev/test/RhinoCheck.java` 会逐个顶层函数编译，可以直接定位这类问题。
 
 ## 6. 日志级别策略
 
@@ -245,7 +335,8 @@ UDP 发现包恰好成功）或第 2 步（已经记住的路由）。当 SRV �
 ## 7. 测试
 
 `../../splitport-mod-dev/` 里有可复现的测试环境。核心是用官方发布包里的
-**真实 Arc / Rhino / 游戏类**加载**真正的 `main.js`**：
+**真实 Arc / Rhino / 游戏类**，并按游戏同款方式（先装 `require`，再跑 `main.js`，
+见 §0）加载**真正的脚本**：
 
 ```bash
 cd ../../splitport-mod-dev/test
@@ -258,11 +349,15 @@ java -cp out:../refs/server-release.jar SplitPortHarness \
 
 | 测试 | 内容 |
 | --- | --- |
-| `test/SplitPortHarness.java` | 离线集成测试：本地转发器扮演 NAT（服务器内部仍是单端口，对外是 12565/TCP + 12566/UDP），本地 DNS 服务器发布 SRV，跑完 9 个场景 |
+| `test/SplitPortHarness.java` | 离线集成测试：本地转发器扮演 NAT（服务器内部仍是单端口，对外是 12565/TCP + 12566/UDP），本地 DNS 服务器发布 SRV（含 CNAME 别名），跑完 10 个场景 |
 | `test/SrvGate.java` | 复现 DNS 并发丢包：400 次查询在 1/4/8/16/64/400 并发下的丢失率 |
 | `test/SrvStress.java` | 用真实社区列表按 `JoinDialog` 的方式整表刷新，检查目标服务器每次都能解析出正确的两个端口 |
 | `test/LivePing.java` | 对真实服务器跑"ping 域名 → 收藏成 ip:端口 → 再 ping 收藏"的完整链路 |
 | `test/ConcurrentPing.java` | 266 条社区条目并发 ping，检查每一个都恰好回调一次 |
+| `test/ModLoader.java` | 复刻游戏的脚本加载：装同款 `require`（`RequireBuilder` + `setSandboxed(true)`）再跑 `main.js`。所有测试都通过它加载模组，否则测的就不是游戏真实走的路径 |
+| `test/RhinoCheck.java` | 逐个模块、逐个顶层函数用游戏自带 Rhino 编译，定位"优化器编译不过"的函数（见 §5 第 10 条） |
+| `test/CnameCase.java` | 真实服务器对照：原版 / 模组 / 带过期记忆路由，分别在 CNAME 域名上的表现 |
+| `test/DnsDump.java` | 抓真实 DNS 应答并逐字节重放 `ArcDns` 的解析循环，展示它在哪一步错位 |
 
 `SplitPortHarness` 覆盖的场景（全部 PASS）：
 
@@ -274,7 +369,9 @@ java -cp out:../refs/server-release.jar SplitPortHarness \
 6. 第一条 `_udp` 记录不可达 → 自动用第二条；
 7. 收藏夹形式（`ip:tcpPort`）的重复 ping；
 8. 模拟重启（全新的 Rhino 作用域 + 空的路由表）后，只靠 settings 里的记忆路由 ping 通；
-9. 自己开服（`Vars.net.host`）时 TCP/UDP 两个端口都正常绑定。
+9. 自己开服（`Vars.net.host`）时 TCP/UDP 两个端口都正常绑定；
+10. `_mindustry._tcp` / `_mindustry._udp` 本身是 CNAME（应答里第二条记录的 owner 用压缩指针
+    指回 CNAME 的 RDATA）时，ping 与连接都正常。
 
 改动 `main.js` 后请至少跑一遍 `SplitPortHarness`；改到 ping 逻辑时再跑 `SrvStress` / `LivePing`
 （需要真实网络，参数见 `../../splitport-mod-dev/README.md`）。
