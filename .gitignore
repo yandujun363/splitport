@@ -8,3 +8,6 @@ Thumbs.db
 
 # NOTE: the built mod archive (<mod-name>.zip) is committed on purpose - it is
 # the file users drop into their mods/ folder. Rebuild it with ./build.sh.
+
+# 模组使用模组浏览器安装，所以不必要提交zip文件
+*.zip

@@ -5,12 +5,12 @@ displayName: "SplitPort (SRV)"
 author: "yandujun363"
 subtitle: "Separate TCP/UDP ports via DNS SRV"
 description: "Client-side only: reads the separate TCP and UDP ports from the _mindustry._tcp and _mindustry._udp SRV records, so you can join servers whose NAT exposes a different external port for each protocol. Falls back to the vanilla single-port logic whenever no SRV record answers, adds no content, and is hidden from the multiplayer mod handshake so servers without it never kick you."
-version: "2.3"
+version: "2.3.0"
 minGameVersion: "146"
 
 # Fill this in once the repository is published somewhere (used for the
 # in-game update/import button).
-# repo: "https://github.com/yandujun363/splitport"
+repo: "https://github.com/yandujun363/splitport"
 
 # Client-side only. 'hidden' keeps this mod out of the mod-list handshake
 # (Mods.getModStrings()) so servers without it do not kick you for having an
